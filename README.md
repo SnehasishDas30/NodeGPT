@@ -10,7 +10,7 @@ With NodeGPT, users can **chat with AI, generate creative text, create AI-genera
 🍃 Built with **MongoDB** for reliable data management.
 
 <h1 align="center">
-  <a href="[YOUR_LIVE_DEMO_LINK](https://node-gpt-seven.vercel.app/)"><strong>➥ Live Demo</strong></a>
+  <a href="https://node-gpt-seven.vercel.app/"><strong>➥ Live Demo</strong></a>
 </h1>
 
 ---
