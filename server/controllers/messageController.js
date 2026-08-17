@@ -1,7 +1,18 @@
 import axios from "axios";
 import Chat from "../models/Chat.js";
 import User from "../models/User.js";
+import ImageKit from "imagekit";
 import openai from "../configs/openai.js";
+
+// ============================================================
+// IMAGEKIT INSTANCE
+// ============================================================
+
+const imagekit = new ImageKit({
+    publicKey: process.env.IMAGEKIT_PUBLIC_KEY,
+    privateKey: process.env.IMAGEKIT_PRIVATE_KEY,
+    urlEndpoint: process.env.IMAGEKIT_URL_ENDPOINT
+});
 
 // ============================================================
 // TEXT MESSAGE CONTROLLER
@@ -22,8 +33,7 @@ export const textMessageController = async (req, res) => {
 
         const userId = req.user._id;
 
-        // Check credits
-        if (req.user.credits < 1) {
+        if (Number(req.user.credits) < 1) {
             return res.json({
                 success: false,
                 message: "You don't have enough credits to use this feature"
@@ -39,7 +49,6 @@ export const textMessageController = async (req, res) => {
             });
         }
 
-        // Find chat
         const chat = await Chat.findOne({
             userId,
             _id: chatId
@@ -52,7 +61,6 @@ export const textMessageController = async (req, res) => {
             });
         }
 
-        // Save user message
         chat.messages.push({
             role: "user",
             content: prompt,
@@ -60,7 +68,6 @@ export const textMessageController = async (req, res) => {
             isImage: false
         });
 
-        // Generate AI response
         const { choices } = await openai.chat.completions.create({
             model: "gemini-3.5-flash",
             messages: [
@@ -81,12 +88,10 @@ export const textMessageController = async (req, res) => {
             isImage: false
         };
 
-        // Save assistant message
         chat.messages.push(reply);
 
         await chat.save();
 
-        // Deduct credit
         await User.updateOne(
             { _id: userId },
             {
@@ -114,7 +119,6 @@ export const textMessageController = async (req, res) => {
     }
 };
 
-
 // ============================================================
 // IMAGE GENERATION MESSAGE CONTROLLER
 // ============================================================
@@ -122,16 +126,14 @@ export const textMessageController = async (req, res) => {
 export const imageMessageController = async (req, res) => {
     try {
         console.log("=================================");
-        console.log("IMAGE CONTROLLER START");
+        console.log("IMAGE GENERATION START");
         console.log("=================================");
 
         // --------------------------------------------------------
-        // Authentication check
+        // Authentication
         // --------------------------------------------------------
 
         if (!req.user) {
-            console.error("IMAGE ERROR: req.user is missing");
-
             return res.status(401).json({
                 success: false,
                 message: "User not authenticated"
@@ -140,8 +142,8 @@ export const imageMessageController = async (req, res) => {
 
         const userId = req.user._id;
 
-        console.log("IMAGE USER ID:", userId);
-        console.log("IMAGE USER CREDITS:", req.user.credits);
+        console.log("User ID:", userId);
+        console.log("User Credits:", req.user.credits);
 
         // --------------------------------------------------------
         // Credit check
@@ -164,15 +166,15 @@ export const imageMessageController = async (req, res) => {
             isPublished
         } = req.body;
 
-        console.log("IMAGE CHAT ID:", chatId);
-        console.log("IMAGE PROMPT:", prompt);
-
         if (!prompt || !chatId) {
             return res.json({
                 success: false,
                 message: "Prompt and chat ID are required"
             });
         }
+
+        console.log("Prompt:", prompt);
+        console.log("Chat ID:", chatId);
 
         // --------------------------------------------------------
         // Find chat
@@ -184,8 +186,6 @@ export const imageMessageController = async (req, res) => {
         });
 
         if (!chat) {
-            console.error("IMAGE ERROR: Chat not found");
-
             return res.json({
                 success: false,
                 message: "Chat not found"
@@ -193,50 +193,52 @@ export const imageMessageController = async (req, res) => {
         }
 
         // --------------------------------------------------------
-        // ImageKit environment variables
+        // Environment check
         // --------------------------------------------------------
 
-        const imageKitEndpoint = process.env.IMAGEKIT_URL_ENDPOINT
-            ?.trim()
-            .replace(/\/+$/, "");
-
-        const imageKitPublicKey =
+        const publicKey =
             process.env.IMAGEKIT_PUBLIC_KEY?.trim();
 
-        const imageKitPrivateKey =
+        const privateKey =
             process.env.IMAGEKIT_PRIVATE_KEY?.trim();
 
+        const urlEndpoint =
+            process.env.IMAGEKIT_URL_ENDPOINT
+                ?.trim()
+                .replace(/\/+$/, "");
+
         console.log("=================================");
-        console.log("IMAGEKIT CONFIG CHECK");
+        console.log("IMAGEKIT CONFIG");
+        console.log("=================================");
         console.log(
-            "IMAGEKIT URL:",
-            imageKitEndpoint || "MISSING"
+            "Public Key:",
+            publicKey ? "Present" : "MISSING"
         );
         console.log(
-            "IMAGEKIT PUBLIC KEY:",
-            imageKitPublicKey ? "Present" : "Missing"
+            "Private Key:",
+            privateKey ? "Present" : "MISSING"
         );
         console.log(
-            "IMAGEKIT PRIVATE KEY:",
-            imageKitPrivateKey ? "Present" : "Missing"
+            "URL Endpoint:",
+            urlEndpoint || "MISSING"
         );
         console.log("=================================");
 
-        if (!imageKitEndpoint) {
-            throw new Error(
-                "IMAGEKIT_URL_ENDPOINT is missing"
-            );
-        }
-
-        if (!imageKitPublicKey) {
+        if (!publicKey) {
             throw new Error(
                 "IMAGEKIT_PUBLIC_KEY is missing"
             );
         }
 
-        if (!imageKitPrivateKey) {
+        if (!privateKey) {
             throw new Error(
                 "IMAGEKIT_PRIVATE_KEY is missing"
+            );
+        }
+
+        if (!urlEndpoint) {
+            throw new Error(
+                "IMAGEKIT_URL_ENDPOINT is missing"
             );
         }
 
@@ -252,34 +254,62 @@ export const imageMessageController = async (req, res) => {
         });
 
         // --------------------------------------------------------
-        // Encode prompt
-        // --------------------------------------------------------
-
-        const encodedPrompt = encodeURIComponent(
-            String(prompt).trim()
-        );
-
-        // --------------------------------------------------------
-        // Generate unique filename
+        // Generate unique file path
         // --------------------------------------------------------
 
         const fileName =
             `quickgpt-${Date.now()}.png`;
 
         // --------------------------------------------------------
-        // ImageKit AI generation URL
+        // IMPORTANT
+        //
+        // ImageKit AI generation syntax:
+        //
+        // /ik-genimg-prompt-{prompt}/{filename}
+        //
+        // We use ImageKit's URL helper to create a SIGNED URL.
+        // This is important if AI transformations are restricted
+        // to signed URLs in ImageKit security settings.
         // --------------------------------------------------------
 
-        const generatedImageUrl =
-            `${imageKitEndpoint}/ik-genimg-prompt-${encodedPrompt}/${fileName}`;
+        const imagePath =
+            `/ik-genimg-prompt-${String(prompt).trim()}/${fileName}`;
 
         console.log("=================================");
-        console.log("IMAGEKIT GENERATED URL:");
+        console.log("IMAGEKIT IMAGE PATH");
+        console.log(imagePath);
+        console.log("=================================");
+
+        // --------------------------------------------------------
+        // Create signed ImageKit URL
+        // --------------------------------------------------------
+
+        let generatedImageUrl;
+
+        try {
+            generatedImageUrl = imagekit.url({
+                path: imagePath,
+                signed: true,
+                expireSeconds: 300
+            });
+        } catch (urlError) {
+            console.error(
+                "IMAGEKIT URL GENERATION ERROR:",
+                urlError
+            );
+
+            throw new Error(
+                `Failed to create ImageKit signed URL: ${urlError.message}`
+            );
+        }
+
+        console.log("=================================");
+        console.log("SIGNED IMAGEKIT URL CREATED");
         console.log(generatedImageUrl);
         console.log("=================================");
 
         // --------------------------------------------------------
-        // Request image from ImageKit
+        // Request generated image
         // --------------------------------------------------------
 
         let imageResponse;
@@ -295,7 +325,7 @@ export const imageMessageController = async (req, res) => {
             );
         } catch (axiosError) {
             console.error("=================================");
-            console.error("IMAGEKIT AXIOS ERROR");
+            console.error("IMAGEKIT REQUEST FAILED");
             console.error("Message:", axiosError.message);
             console.error("Code:", axiosError.code);
             console.error("=================================");
@@ -326,7 +356,7 @@ export const imageMessageController = async (req, res) => {
         console.log("=================================");
 
         // --------------------------------------------------------
-        // Handle intermediate response
+        // ImageKit still generating
         // --------------------------------------------------------
 
         if (
@@ -341,7 +371,7 @@ export const imageMessageController = async (req, res) => {
         }
 
         // --------------------------------------------------------
-        // Handle ImageKit errors
+        // Handle ImageKit error
         // --------------------------------------------------------
 
         if (
@@ -361,15 +391,28 @@ export const imageMessageController = async (req, res) => {
             }
 
             console.error("=================================");
-            console.error("IMAGEKIT ERROR RESPONSE");
-            console.error("Status:", imageResponse.status);
-            console.error("Content-Type:", contentType);
-            console.error("Response:", errorText);
+            console.error("IMAGEKIT ERROR");
+            console.error("=================================");
             console.error(
-                "ImageKit Error Header:",
+                "Status:",
+                imageResponse.status
+            );
+            console.error(
+                "Content-Type:",
+                contentType
+            );
+            console.error(
+                "Response:",
+                errorText
+            );
+            console.error(
+                "IK Error:",
                 imageResponse.headers["ik-error"] || "None"
             );
-            console.error("URL:", generatedImageUrl);
+            console.error(
+                "Generated URL:",
+                generatedImageUrl
+            );
             console.error("=================================");
 
             throw new Error(
@@ -382,17 +425,11 @@ export const imageMessageController = async (req, res) => {
         // --------------------------------------------------------
 
         console.log("=================================");
-        console.log("IMAGEKIT IMAGE GENERATED SUCCESSFULLY");
-        console.log("Image URL:", generatedImageUrl);
+        console.log("IMAGE GENERATED SUCCESSFULLY");
         console.log("=================================");
 
         // --------------------------------------------------------
-        // Save assistant response
-        //
-        // IMPORTANT:
-        // ImageKit AI generated image is already available
-        // at generatedImageUrl.
-        // No second imagekit.upload() call is required here.
+        // Assistant reply
         // --------------------------------------------------------
 
         const reply = {
@@ -412,7 +449,7 @@ export const imageMessageController = async (req, res) => {
         await chat.save();
 
         // --------------------------------------------------------
-        // Deduct 2 credits
+        // Deduct credits
         // --------------------------------------------------------
 
         await User.updateOne(
@@ -426,11 +463,11 @@ export const imageMessageController = async (req, res) => {
 
         console.log("=================================");
         console.log("IMAGE GENERATION SUCCESS");
-        console.log("Credits deducted: 2");
+        console.log("2 CREDITS DEDUCTED");
         console.log("=================================");
 
         // --------------------------------------------------------
-        // Send response
+        // Response
         // --------------------------------------------------------
 
         return res.json({
@@ -441,6 +478,7 @@ export const imageMessageController = async (req, res) => {
     } catch (error) {
         console.error("=================================");
         console.error("IMAGE GENERATION ERROR");
+        console.error("=================================");
         console.error("Message:", error.message);
         console.error("Stack:", error.stack);
         console.error("=================================");
